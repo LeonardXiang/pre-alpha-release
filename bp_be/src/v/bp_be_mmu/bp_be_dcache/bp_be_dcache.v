@@ -181,7 +181,21 @@ module bp_be_dcache
   logic byte_op_tl_r;
   logic [bp_page_offset_width_gp-1:0] page_offset_tl_r;
   logic [data_width_p-1:0] data_tl_r;
+  logic [paddr_width_p-1:0] paddr_tl;
+  logic [tag_width_lp-1:0] addr_tag_tl;
+  logic load_hit_bit_r;
+  logic store_hit_bit_r;
+  logic [way_id_width_lp-1:0] load_hit_way_r;
+  logic [way_id_width_lp-1:0] store_hit_way_r;
+  logic load_hit_bit_tl;
+  logic store_hit_bit_tl;
+  logic [way_id_width_lp-1:0] load_hit_way_tl;
+  logic [way_id_width_lp-1:0] store_hit_way_tl;
 
+
+   assign paddr_tl = {ptag_i, page_offset_tl_r};
+   
+  assign addr_tag_tl = paddr_tl[block_offset_width_lp+index_width_lp+:tag_width_lp]; 
   assign tl_we = v_i & ready_o & ~poison_i;
  
   always_ff @ (posedge clk_i) begin
@@ -277,6 +291,11 @@ module bp_be_dcache
   logic [index_width_lp-1:0] addr_index_tv;
   logic [word_offset_width_lp-1:0] addr_word_offset_tv;
 
+  logic [ways_p-1:0] load_hit_tv_r;
+  logic [ways_p-1:0] load_hit_tl;
+  logic [ways_p-1:0] store_hit_tv_r;
+  logic [ways_p-1:0] store_hit_tl;
+
   assign tv_we = v_tl_r & ~poison_i & ~tlb_miss_i;
 
   always_ff @ (posedge clk_i) begin
@@ -285,7 +304,6 @@ module bp_be_dcache
     end
     else begin
       v_tv_r <= tv_we;
-
       if (tv_we) begin
         load_op_tv_r <= load_op_tl_r;
         store_op_tv_r <= store_op_tl_r;
@@ -296,6 +314,12 @@ module bp_be_dcache
         byte_op_tv_r <= byte_op_tl_r;
         paddr_tv_r <= {ptag_i, page_offset_tl_r};
         tag_info_tv_r <= tag_mem_data_lo;
+        store_hit_tv_r <= store_hit_tl; 
+        load_hit_tv_r <= load_hit_tl; 
+        load_hit_bit_r <= load_hit_bit_tl;
+        store_hit_bit_r <= store_hit_bit_tl;
+        load_hit_way_r <= load_hit_way_tl;
+        store_hit_way_r <= store_hit_way_tl;
       end
 
       if (tv_we & load_op_tl_r) begin
@@ -311,24 +335,20 @@ module bp_be_dcache
   assign addr_tag_tv = paddr_tv_r[block_offset_width_lp+index_width_lp+:tag_width_lp];
   assign addr_index_tv = paddr_tv_r[block_offset_width_lp+:index_width_lp];
   assign addr_word_offset_tv = paddr_tv_r[byte_offset_width_lp+:word_offset_width_lp];
-
+   
   // miss_detect
   //
-  logic [ways_p-1:0] load_hit_tv;
-  logic [ways_p-1:0] store_hit_tv;
+  logic [ways_p-1:0] way_hit_tl; 
   logic [ways_p-1:0] invalid_tv;
   logic load_miss_tv;
   logic store_miss_tv;
-  logic load_hit;
-  logic store_hit;
-  logic [way_id_width_lp-1:0] load_hit_way;
-  logic [way_id_width_lp-1:0] store_hit_way;
 
   for (genvar i = 0; i < ways_p; i++) begin
-    assign load_hit_tv[i] = (addr_tag_tv == tag_info_tv_r[i].tag)
-      & (tag_info_tv_r[i].coh_state != e_MESI_I);
-    assign store_hit_tv[i] = (addr_tag_tv == tag_info_tv_r[i].tag)
-      & (tag_info_tv_r[i].coh_state == e_MESI_E);
+    assign way_hit_tl[i] = addr_tag_tl == tag_mem_data_lo[i].tag; 
+    assign load_hit_tl[i] = way_hit_tl[i]
+      & (tag_mem_data_lo[i].coh_state != e_MESI_I);
+    assign store_hit_tl[i] = way_hit_tl[i]
+      & (tag_mem_data_lo[i].coh_state == e_MESI_E);
     assign invalid_tv[i] = (tag_info_tv_r[i].coh_state == e_MESI_I);
   end
 
@@ -337,9 +357,9 @@ module bp_be_dcache
       ,.lo_to_hi_p(1)
       )
     pe_load_hit
-    (.i(load_hit_tv)
-      ,.v_o(load_hit)
-      ,.addr_o(load_hit_way)
+    (.i(load_hit_tl)
+      ,.v_o(load_hit_bit_tl)
+      ,.addr_o(load_hit_way_tl)
       );
   
   bsg_priority_encode
@@ -347,13 +367,13 @@ module bp_be_dcache
       ,.lo_to_hi_p(1)
       )
     pe_store_hit
-    (.i(store_hit_tv)
-      ,.v_o(store_hit)
-      ,.addr_o(store_hit_way)
+    (.i(store_hit_tl)
+      ,.v_o(store_hit_bit_tl)
+      ,.addr_o(store_hit_way_tl)
       );
 
-  assign load_miss_tv = ~load_hit & v_tv_r & load_op_tv_r;
-  assign store_miss_tv = ~store_hit & v_tv_r & store_op_tv_r;
+  assign load_miss_tv = ~load_hit_bit_r & v_tv_r & load_op_tv_r;
+  assign store_miss_tv = ~store_hit_bit_r & v_tv_r & store_op_tv_r;
 
 
   // write buffer
@@ -414,7 +434,7 @@ module bp_be_dcache
   assign wbuf_entry_out_index = wbuf_entry_out.paddr[block_offset_width_lp+:index_width_lp];
 
   assign wbuf_entry_in.paddr = paddr_tv_r;
-  assign wbuf_entry_in.way_id = store_hit_way;
+  assign wbuf_entry_in.way_id = store_hit_way_r;
 
   if (data_width_p == 64) begin
     assign wbuf_entry_in.data = double_op_tv_r
@@ -594,7 +614,7 @@ module bp_be_dcache
       )
     ld_data_set_select_mux
       (.data_i(ld_data_tv_r)
-      ,.sel_i(load_hit_way ^ addr_word_offset_tv)
+      ,.sel_i(load_hit_way_r ^ addr_word_offset_tv)
       ,.data_o(ld_data_way_picked)
       );
 
@@ -790,8 +810,8 @@ module bp_be_dcache
 
   always_comb begin
     if (v_tv_r) begin
-      lru_decode_way_li = store_op_tv_r ? store_hit_way : load_hit_way;
-      dirty_mask_way_li = store_hit_way;
+      lru_decode_way_li = store_op_tv_r ? store_hit_way_r : load_hit_way_r;
+      dirty_mask_way_li = store_hit_way_r;
       dirty_mask_v_li = store_op_tv_r;
       
       stat_mem_data_li.lru = lru_decode_data_lo;
@@ -829,7 +849,7 @@ module bp_be_dcache
 
   // write buffer
   //
-  assign wbuf_v_li = v_tv_r & store_op_tv_r & store_hit;
+  assign wbuf_v_li = v_tv_r & store_op_tv_r & store_hit_bit_r;
   assign wbuf_yumi_li = wbuf_v_lo & ~(load_op & tl_we);
   assign bypass_v_li = tv_we & load_op_tl_r;
   assign lce_snoop_index_li = lce_data_mem_pkt.index;
@@ -889,10 +909,10 @@ module bp_be_dcache
 
   always_ff @ (negedge clk_i) begin
     if (v_tv_r) begin
-      assert($countones(load_hit_tv) <= 1)
-        else $error("multiple load hit: %b. id = %0d", load_hit_tv, lce_id_i);
-      assert($countones(store_hit_tv) <= 1)
-        else $error("multiple store hit: %b. id = %0d", store_hit_tv, lce_id_i);
+      assert($countones(load_hit_tv_r) <= 1)
+        else $error("multiple load hit: %b. id = %0d", load_hit_tv_r, lce_id_i);
+      assert($countones(store_hit_tv_r) <= 1)
+        else $error("multiple store hit: %b. id = %0d", store_hit_tv_r, lce_id_i);
     end
   end
 
